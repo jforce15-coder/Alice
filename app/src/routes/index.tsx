@@ -139,6 +139,8 @@ svg{display:block}
 .aline:last-of-type .t,.aline.playing .t{color:var(--ink)}
 .aline .s{margin:4px 0 0;font-size:14px;color:var(--faint)}
 .aline.same .t{font:400 16px/1.4 var(--sans);color:var(--faint)}
+.field{height:56px;border-radius:16px;border:0;background:var(--raised);padding:0 18px;font-size:17px}
+.btn:disabled{opacity:.5}
 .sheet{position:fixed;inset:auto 0 0 0;background:var(--raised);border-radius:22px 22px 0 0;padding:22px max(20px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left));display:flex;flex-direction:column;gap:14px;animation:up .32s cubic-bezier(.2,.8,.2,1) both;z-index:5}
 .sheet h3{margin:0;font:600 20px var(--display);letter-spacing:-.02em}
 .sheet p{margin:0;color:var(--muted);font-size:15px}
@@ -160,17 +162,19 @@ const Check = () => (<svg width="20" height="20" viewBox="0 0 24 24" fill="none"
 const Chevron = () => (<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><path d="m6 9 6 6 6-6" /></svg>)
 
 function Index() {
-  const [mode, setMode] = useState<'loading' | 'host' | 'guest'>('loading')
+  const [mode, setMode] = useState<'loading' | 'host' | 'guest' | 'admin'>('loading')
   const [key, setKey] = useState('')
   useEffect(() => {
     const k = new URLSearchParams(window.location.search).get('host')
-    if (k) { setKey(k); setMode('host') } else setMode('guest')
+    const ad = new URLSearchParams(window.location.search).get('admin')
+    if (ad) { setKey(ad); setMode('admin') } else if (k) { setKey(k); setMode('host') } else setMode('guest')
   }, [])
   return (
     <>
       <style>{CSS}</style>
       {mode === 'host' && <Host hostKey={key} />}
       {mode === 'guest' && <Guest />}
+      {mode === 'admin' && <Admin adminKey={key} />}
     </>
   )
 }
@@ -199,6 +203,8 @@ function Host({ hostKey }: { hostKey: string }) {
   const [engine, setEngine] = useState<'' | 'scribe' | 'chrome'>('')
   const [warn, setWarn] = useState('')
   const wantRef = useRef<string[]>(['es'])
+  const [shared, setShared] = useState(false)
+  const sharedRef = useRef(false)
   const ctxRef = useRef<AudioContext | null>(null)
   // Modo Alice: this phone listens AND plays the translation in your headphones
   const [mode, setModeState] = useState<'event' | 'alice'>('event')
@@ -231,6 +237,7 @@ function Host({ hostKey }: { hostKey: string }) {
       const id = localStorage.getItem('alice-mic') || ''; micIdRef.current = id; setMicIdState(id)
     } catch {}
     player.current = new Audio()
+    fetch('/api/config', { cache: 'no-store' }).then(r => r.json()).then(j => { sharedRef.current = !!j.voice; setShared(!!j.voice) }).catch(() => {})
     refreshMics()
     navigator.mediaDevices?.addEventListener?.('devicechange', refreshMics)
     let raf = 0
@@ -515,13 +522,13 @@ function Host({ hostKey }: { hostKey: string }) {
     liveRef.current = true; setLive(true); setNote('Conectando el oído de ElevenLabs…')
     if (modeRef.current === 'alice') { unlockPlayer(); setLog([]); aq.current = []; lastSpoken.current = '' }
     else fetch('/api/session?k=' + encodeURIComponent(hostKey), { method: 'POST' }).catch(() => {})
-    if (xiRef.current && await startScribe()) {
+    if ((xiRef.current || sharedRef.current) && await startScribe()) {
       if (!liveRef.current) { stopMic(); try { wsRef.current?.close() } catch {} return }
       setEngine('scribe'); setNote(''); return
     }
     if (!liveRef.current) return
     setEngine('chrome')
-    setNote(xiRef.current ? (failRef.current || 'No se pudo conectar ElevenLabs.') + ' Usando el oído del teléfono.' : 'Conecta la voz de Alma para usar el oído de ElevenLabs. Usando el oído del teléfono.')
+    setNote((xiRef.current || sharedRef.current) ? (failRef.current || 'No se pudo conectar ElevenLabs.') + ' Usando el oído del teléfono.' : 'Conecta la voz de Alma para usar el oído de ElevenLabs. Usando el oído del teléfono.')
     startChrome()
   }
   function stop() {
@@ -597,7 +604,8 @@ function Host({ hostKey }: { hostKey: string }) {
         )}
       </div>
       <div className="foot">
-        <button className={'chip ' + (xi ? 'ok' : 'warn')} onClick={() => setSheet(true)}>{xi ? 'Voz de Alma activa' : 'Conectar voz de Alma'}</button>
+        {(xi || !shared) && <button className={'chip ' + (xi || shared ? 'ok' : 'warn')} onClick={() => setSheet(true)}>{xi ? 'Voz de Alma activa' : 'Conectar voz de Alma'}</button>}
+        {shared && !xi && <span className="chip ok">Voz de Alma activa</span>}
         {!alice && <button className="chip" onClick={copyLink}>{copied ? 'Link copiado' : 'Copiar link de invitados'}</button>}
       </div>
       {sheet && (<>
@@ -771,6 +779,60 @@ function Guest() {
             {lang !== 'en' && <p className="src">{cur.en}</p>}
           </>) : <p className="waiting">{t.waiting}</p>}
         </div>
+      </div>
+    </div>
+  )
+}
+
+/* ───────────── ADMIN ───────────── */
+function Admin({ adminKey }: { adminKey: string }) {
+  const [st, setSt] = useState<{ configured: boolean; hint?: string; siteSecret?: boolean } | null>(null)
+  const [denied, setDenied] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [msg, setMsg] = useState('')
+  const [busy, setBusy] = useState(false)
+  const url = '/api/admin?k=' + encodeURIComponent(adminKey)
+  async function load() {
+    try { const r = await fetch(url, { cache: 'no-store' }); if (r.status === 403) { setDenied(true); return } setSt(await r.json()) } catch { setMsg('Sin conexión.') }
+  }
+  useEffect(() => { load() }, [])
+  async function save(e: { preventDefault(): void }) {
+    e.preventDefault(); if (!draft.trim()) return
+    setBusy(true); setMsg('Verificando la key con ElevenLabs…')
+    try {
+      const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key: draft.trim() }) })
+      const j = await r.json()
+      if (!r.ok) setMsg(j.error === 'invalid' ? 'ElevenLabs rechazó esta key. Revísala y vuelve a pegarla.' : 'No se pudo guardar.')
+      else {
+        setDraft(''); setSt(j)
+        setMsg(j.stt && j.tts ? 'Guardada. Oído y voz funcionan.' : !j.stt ? 'Guardada, pero le falta el permiso Speech to Text: la app usará el oído del teléfono.' : 'Guardada, pero le falta el permiso Text to Speech: Alma no podrá hablar.')
+      }
+    } catch { setMsg('Sin conexión.') }
+    setBusy(false)
+  }
+  async function clear() {
+    setBusy(true)
+    try { await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'clear' }) }); setSt({ configured: false }); setMsg('Key eliminada.') } catch { setMsg('Sin conexión.') }
+    setBusy(false)
+  }
+  return (
+    <div className="app">
+      <div className="bar"><span className={'status' + (st?.configured ? ' on' : '')}><i />Administrador</span></div>
+      <div className="onb">
+        <h1>Voz de Alma</h1>
+        {denied ? <p className="lead">Este link de administrador no es válido.</p> : (<>
+          <p className="lead">La key que guardes aquí la usan todos los teléfonos con link de host, en modo Alice y en modo Evento. Nadie más puede verla.</p>
+          <div className="langs">
+            <div className="lang"><b>Estado</b><span>{st == null ? 'Cargando…' : st.configured ? 'Configurada ' + (st.hint || '') : 'Sin key'}</span><span className="chk" style={{ opacity: st?.configured ? 1 : 0 }}><Check /></span></div>
+          </div>
+          <form className="actions" onSubmit={save}>
+            <input id="admin-xi" className="field" type="password" autoComplete="off" placeholder={st?.configured ? 'Pegar una key nueva para reemplazarla' : 'Pega la API key de ElevenLabs (sk_…)'} value={draft} onChange={e => setDraft(e.target.value)} />
+            <button className="btn pri" type="submit" disabled={busy || !draft.trim()}>{st?.configured ? 'Reemplazar key' : 'Guardar key'}</button>
+            {st?.configured && <button className="btn sec" type="button" disabled={busy} onClick={clear}>Eliminar key</button>}
+          </form>
+          {msg && <p className="lead" style={{ marginTop: 0 }}>{msg}</p>}
+          <p className="lead" style={{ marginTop: 0, fontSize: 15 }}>La key necesita los permisos Text to Speech y Speech to Text.</p>
+        </>)}
       </div>
     </div>
   )

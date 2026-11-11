@@ -34,7 +34,7 @@ async function call(key: string, model: string, text: string, lang: string, prev
 
 // Fast and reliable first: Turbo v2.5 with continuity; Flash as a backup. Never drops a phrase silently.
 export async function tts(text: string, lang: string, hostKey?: string, _mood?: string, prev = ''): Promise<ArrayBuffer | null> {
-  const key = (bindings() as any).ELEVENLABS_API_KEY || hostKey
+  const key = await resolveKey(hostKey)
   if (!key || !text) return null
   const t = text.slice(0, 800)
   return (await call(key, 'eleven_turbo_v2_5', t, lang, prev, 6000))
@@ -59,4 +59,22 @@ export async function translateServer(text: string, tl: string): Promise<string>
     if (v && !/MYMEMORY WARNING/i.test(v)) return v
   } catch {}
   return ''
+}
+
+// ── Admin-managed ElevenLabs key (stored server-side, never sent to any phone) ──
+const ADMIN_HASH = '32d1c4460e578a8620132e7d09b67d48ea7cd6950a97aa4bcfed1d3604e1c722'
+async function sha(k: string) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(k))
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('')
+}
+export async function isAdmin(k: string | null): Promise<boolean> { return !!k && (await sha(k)) === ADMIN_HASH }
+export async function storedKey(): Promise<string> {
+  const db = (bindings() as any).DB
+  if (!db) return ''
+  const r = await db.prepare("SELECT v FROM meta WHERE k = 'xi_key'").first().catch(() => null)
+  return r?.v || ''
+}
+// A key the user pasted on their own phone wins; otherwise the admin's key; otherwise the site secret.
+export async function resolveKey(hostKey?: string): Promise<string> {
+  return (hostKey || '').trim() || (await storedKey()) || (bindings() as any).ELEVENLABS_API_KEY || ''
 }
