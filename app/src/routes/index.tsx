@@ -223,7 +223,10 @@ function Host({ hostKey }: { hostKey: string }) {
     try { (navigator as any).wakeLock?.request('screen') } catch {}
     try { const k = localStorage.getItem('alma-xi') || ''; setXi(k); xiRef.current = k } catch {}
     try {
-      const m = localStorage.getItem('alma-mode'); if (m === 'alice') { modeRef.current = 'alice'; setModeState('alice') }
+      // ?modo=alice or ?modo=evento in the link always wins over the last mode used
+      const qm = new URLSearchParams(window.location.search).get('modo')
+      const m = qm === 'alice' ? 'alice' : qm === 'evento' ? 'event' : localStorage.getItem('alma-mode')
+      if (m === 'alice') { modeRef.current = 'alice'; setModeState('alice') } else if (qm === 'evento') { modeRef.current = 'event'; setModeState('event') }
       const t = localStorage.getItem('alice-lang'); if (t && LANGS.some(l => l.code === t)) { targetRef.current = t; setTargetState(t) }
       const id = localStorage.getItem('alice-mic') || ''; micIdRef.current = id; setMicIdState(id)
     } catch {}
