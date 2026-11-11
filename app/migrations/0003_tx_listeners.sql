@@ -1,0 +1,12 @@
+CREATE TABLE IF NOT EXISTS line_tx (
+  id INTEGER NOT NULL,
+  lang TEXT NOT NULL,
+  text TEXT NOT NULL,
+  PRIMARY KEY (id, lang)
+);
+CREATE TABLE IF NOT EXISTS listeners (
+  sid TEXT PRIMARY KEY,
+  lang TEXT NOT NULL,
+  audio INTEGER NOT NULL,
+  seen INTEGER NOT NULL
+);
