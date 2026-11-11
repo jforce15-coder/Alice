@@ -220,6 +220,8 @@ function Host({ hostKey }: { hostKey: string }) {
   const aq = useRef<{ id: number; p: Promise<string | null>; text: string }[]>([])
   const aPlaying = useRef(false)
   const lastSpoken = useRef('')
+  const spokenRef = useRef<{ t: number; w: Set<string> }[]>([])
+  const heardRecent = useRef<{ t: number; k: string }[]>([])
   const seq = useRef(0)
   const setMode = (m: 'event' | 'alice') => { modeRef.current = m; setModeState(m); try { localStorage.setItem('alma-mode', m) } catch {} }
   const setTarget = (t: string) => { targetRef.current = t; setTargetState(t); try { localStorage.setItem('alice-lang', t) } catch {} }
@@ -254,21 +256,33 @@ function Host({ hostKey }: { hostKey: string }) {
 
   // Pick the phone's own mic, never the headset's, so the headphones keep full-quality audio.
   const HEADSET = /bluetooth|airpods|buds|headset|hands-?free|wh-|jabra|beats|bose|sony|auricular|casque|kopfh/i
-  const BUILTIN = /iphone|built-?in|interno|integrado|speakerphone|phone|bottom|back|front|default|predeterminado/i
   async function refreshMics() {
     try {
       const all = await navigator.mediaDevices.enumerateDevices()
       const list = all.filter(d => d.kind === 'audioinput' && d.deviceId).map((d, i) => ({ id: d.deviceId, label: d.label || 'Micrófono ' + (i + 1) }))
       setMics(list)
-      const keep = list.find(d => d.id === micIdRef.current)
-      if (!keep || HEADSET.test(keep.label)) {
-        const best = list.find(d => BUILTIN.test(d.label) && !HEADSET.test(d.label)) || list.find(d => !HEADSET.test(d.label))
-        if (best) setMicId(best.id)
-      }
+      if (micIdRef.current && !list.some(d => d.id === micIdRef.current)) setMicId('')
     } catch {}
   }
   function unlockPlayer() { const a = player.current; if (a) { a.src = SILENT; a.play().catch(() => {}) } }
+  function words(x: string) {
+    return x.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 1)
+  }
+  function isEcho(src: string) {
+    const w = words(src)
+    if (!w.length) return true
+    const now = Date.now()
+    spokenRef.current = spokenRef.current.filter(x => now - x.t < 30000)
+    heardRecent.current = heardRecent.current.filter(x => now - x.t < 10000)
+    // mostly the same words Alma said in the last 30 s → it is her voice coming back through the mic
+    if (spokenRef.current.some(x => w.filter(v => x.w.has(v)).length / w.length >= 0.5)) return true
+    const key = w.join(' ')
+    if (heardRecent.current.some(x => x.k === key)) return true
+    heardRecent.current.push({ t: now, k: key })
+    return false
+  }
   function speak(text: string, id: number) {
+    spokenRef.current.push({ t: Date.now(), w: new Set(words(text)) })
     const lang = targetRef.current, prev = lastSpoken.current
     lastSpoken.current = text
     const p = (async () => {
@@ -302,6 +316,7 @@ function Host({ hostKey }: { hostKey: string }) {
     } else done()
   }
   async function sendAlice(src: string) {
+    if (isEcho(src)) return
     const t = targetRef.current
     let r = await tr(src, t)
     if (!r.text) {
@@ -314,6 +329,7 @@ function Host({ hostKey }: { hostKey: string }) {
     setWarn('')
     // Your own words (already in your language) are shown but not read back to you.
     const same = !!r.src && r.src.slice(0, 2) === t
+    if (!same && spokenRef.current.some(x => { const w = words(r.text); return w.length > 0 && w.filter(v => x.w.has(v)).length / w.length >= 0.7 })) return
     const id = ++seq.current
     setLog(prev => [...prev, { id, src, text: same ? src : r.text, same }].slice(-12))
     if (!same) speak(r.text, id)
@@ -472,9 +488,8 @@ function Host({ hostKey }: { hostKey: string }) {
       ctxRef.current = null
       const alice = modeRef.current === 'alice'
       // In Alice mode echo cancellation is off: on many phones it switches Bluetooth headphones into low-quality "call" mode.
-      const audioC: any = alice
-        ? { echoCancellation: false, noiseSuppression: false, autoGainControl: true, channelCount: 1 }
-        : { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
+      // Echo cancellation stays on: it removes Alma's own voice from the mic so she never translates herself.
+      const audioC: any = { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
       if (alice && micIdRef.current) audioC.deviceId = { exact: micIdRef.current }
       let stream: MediaStream
       try { stream = await navigator.mediaDevices.getUserMedia({ audio: audioC }) }
@@ -520,7 +535,7 @@ function Host({ hostKey }: { hostKey: string }) {
     ck.current = { idx: -1, committed: 0, start: 0, lastEmit: Date.now() }
     failRef.current = ''; setWarn(''); setSaid(''); setHeard('')
     liveRef.current = true; setLive(true); setNote('Conectando el oído de ElevenLabs…')
-    if (modeRef.current === 'alice') { unlockPlayer(); setLog([]); aq.current = []; lastSpoken.current = '' }
+    if (modeRef.current === 'alice') { unlockPlayer(); setLog([]); aq.current = []; lastSpoken.current = ''; spokenRef.current = []; heardRecent.current = [] }
     else fetch('/api/session?k=' + encodeURIComponent(hostKey), { method: 'POST' }).catch(() => {})
     if ((xiRef.current || sharedRef.current) && await startScribe()) {
       if (!liveRef.current) { stopMic(); try { wsRef.current?.close() } catch {} return }
@@ -548,7 +563,7 @@ function Host({ hostKey }: { hostKey: string }) {
   }
 
   const alice = mode === 'alice'
-  const micLabel = mics.find(m => m.id === micId)?.label || 'Micrófono del teléfono'
+  const micLabel = mics.find(m => m.id === micId)?.label || 'Micrófono automático'
   const tLabel = LANGS.find(l => l.code === target)?.label
   const recent = log.slice(-4)
   return (
@@ -571,7 +586,8 @@ function Host({ hostKey }: { hostKey: string }) {
           </span>
           <span className="pill mic"><MicIcon /><span className="ell">{micLabel}</span><Chevron />
             <select value={micId} onChange={e => setMicId(e.target.value)} onFocus={refreshMics} disabled={live} aria-label="Micrófono">
-              {mics.length ? mics.map(m => <option key={m.id} value={m.id}>{m.label}{HEADSET.test(m.label) ? ' (audífonos)' : ''}</option>) : <option value="">Micrófono del teléfono</option>}
+              <option value="">Automático (recomendado)</option>
+              {mics.map(m => <option key={m.id} value={m.id}>{m.label}{HEADSET.test(m.label) ? ' (audífonos)' : ' (puede sacar el sonido por la bocina)'}</option>)}
             </select>
           </span>
         </div>
@@ -582,7 +598,7 @@ function Host({ hostKey }: { hostKey: string }) {
         </button>
         <h2>{live ? 'Escuchando' : 'Toca para empezar'}</h2>
         <p className="sub">{note || (alice
-          ? (live ? 'Deja el teléfono en la mesa. Oyes la traducción en tus audífonos.' : 'Conecta tus audífonos y deja el teléfono en la mesa.')
+          ? (live ? 'Deja el teléfono en la mesa. Oyes la traducción en tus audífonos.' : 'Conecta tus audífonos antes de empezar y deja el teléfono en la mesa.')
           : (live ? (engine === 'scribe' ? 'Oído de ElevenLabs activo. Apunta hacia quien habla.' : 'Apunta el teléfono hacia quien habla.') : 'Traduce a español y 4 idiomas más.'))}</p>
         {alice ? (
           <div className="alog">
